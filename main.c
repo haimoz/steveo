@@ -1,7 +1,7 @@
+#include "read_jpeg.h"
+
 #include <stdio.h>
 #include <stdlib.h>
-
-#include "read_jpeg.h"
 
 int main(int argc, char** argv)
 {

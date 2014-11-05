@@ -1,9 +1,5 @@
 #include "read_jpeg.h"
 
-#include <stdio.h>
-#include <jpeglib.h>
-#include <setjmp.h>
-
 int read_jpeg(char* filename, struct jpeg_img *img)
 {
 	/* This struct contains the JPEG decompression parameters and pointers to
