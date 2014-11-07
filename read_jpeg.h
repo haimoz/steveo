@@ -10,11 +10,12 @@ struct jpeg_img {
 	int width;
 	int height;
 	int num_components;
+	int is_stereo;
 	JSAMPLE *data;
 };
 
 /* reads a JPEG image from file system, then decode and return its data as a struct */
-int read_jpeg(char* filename, struct jpeg_img *img);
+int read_jpeg(const char* filename, struct jpeg_img *img);
 
 #endif
 

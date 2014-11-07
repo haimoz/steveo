@@ -1,6 +1,17 @@
 #include "read_jpeg.h"
 
-int read_jpeg(char* filename, struct jpeg_img *img)
+/* utility function to determine whether input image is JPS or JPEG from extension */
+int isJPS(const char *name)
+{
+	int ret;
+	char c;
+	while (c = *(name++)) {
+		ret = ((c == 's') || (c == 'S')) ? 1:0;
+	}
+	return ret;
+}
+
+int read_jpeg(const char* filename, struct jpeg_img *img)
 {
 	/* This struct contains the JPEG decompression parameters and pointers to
 	 * working space (which is allocated as needed by the JPEG library).
@@ -67,6 +78,7 @@ int read_jpeg(char* filename, struct jpeg_img *img)
 	/* Allocate memory for the image data, 
 	 * based on the dimension and number of components of the input file.  
 	 */
+	img->is_stereo = isJPS(filename);
 	img->width = cinfo.output_width;
 	img->height = cinfo.output_height;
 	img->num_components = cinfo.out_color_components;
