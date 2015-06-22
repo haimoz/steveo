@@ -1,4 +1,5 @@
 #include "read_jpeg.h"
+#include "debug.h"
 
 /* utility function to determine whether input image is JPS or JPEG from extension */
 int isJPS(const char *name)

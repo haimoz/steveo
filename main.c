@@ -1,199 +1,341 @@
 #include "read_jpeg.h"
 #include "npot_tex.h"
+#include "image_manager.h"
+#include "presentation_control.h"
+#include "presentation_control_side_by_side.h"
+#include "debug.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <time.h>
 
 #include <GL/glut.h>
 
 #define LEFT  0
 #define RIGHT 1
 
-int stereo_mode;
+const struct presentation *presenter;
 
-void checkGLError(int n)
+const double param_change_rate_per_second = 1.2;
+
+struct timespec down_time[1 << (8 * sizeof(char))] = { 0 };
+int is_kb_busy = 0; // whether the keyboard (non-special keys in GLUT context) is busy
+
+struct {
+	int x;
+	int y;
+} drag_start = { -1, -1 };
+int is_dragging = 0;
+
+double time_diff(const struct timespec *start, const struct timespec *end)
 {
-	GLuint err;
-	if ((err = glGetError())) {
-		printf("GL Error %d: %s\n",n,gluErrorString(err));
+	struct timespec diff;
+	if (start->tv_sec > end->tv_sec) {
+		fprintf(stderr, "In %s: end time %ds:%ldns is earlier than start time %ds:%ldns\n", __func__, end->tv_sec, end->tv_nsec, start->tv_sec, start->tv_nsec);
+		exit(EXIT_FAILURE);
 	}
-	
-	return;
+	diff.tv_sec = end->tv_sec - start->tv_sec;
+	if (start->tv_nsec > end->tv_nsec) {
+		if (--diff.tv_sec < 0) {
+			fprintf(stderr, "In %s: end time %ds:%ldns is earlier than start time %ds:%ldns\n", __func__, end->tv_sec, end->tv_nsec, start->tv_sec, start->tv_nsec);
+			exit(EXIT_FAILURE);
+		} else {
+			diff.tv_nsec = 1000000000 - start->tv_nsec + end->tv_nsec;
+		}
+	} else {
+		diff.tv_nsec = end->tv_nsec - start->tv_nsec;
+	}
+	return (double)diff.tv_nsec * 1e-9 + diff.tv_sec;
 }
 
-struct jpeg_img *imgs; // image data in CPU RAM
-int num_imgs; // number of images
-GLuint *tids; // texture IDs
-struct npot_tex *textures; // texutres
+int is_zero_timespec(const struct timespec *ts)
+{
+	return ts->tv_sec == 0 && ts->tv_nsec == 0;
+}
 
-int curr_img_index; // index of image being shown
-double scr_aspect = 16/9.0;
-
+/* draw the image in the Z = 0 plane, centered at the origin, with a width of 2, 
+ * and height according to the aspect ratio of the designated viewport.  
+ */
 void drawImage(int side) {
-	/* clear screen */
-	glClearColor(0,0,0,0);
-	glClear( GL_COLOR_BUFFER_BIT );
-	/* setup view */
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	glOrtho(-scr_aspect,scr_aspect,-1,1,0,10);
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-	gluLookAt(0,0,1, 0,0,0, 0,1,0);
-	/* bind texture */
-	glBindTexture( GL_TEXTURE_2D , tids[curr_img_index] );
-	/* push vertices */
-	double w, h; // size drawn on the view frustum
-	double asp = textures[curr_img_index].real_aspect;
-	if (asp > scr_aspect) {
-		// max width
-		w = scr_aspect;
-		h = scr_aspect / asp;
+	GLint data[4];
+	glGetIntegerv(GL_VIEWPORT, data);
+	CHECK_GL;
+	double vp_asp = data[2] / (double)data[3];
+	WHAT_IS(data[0], "%d");
+	WHAT_IS(data[1], "%d");
+	WHAT_IS(data[2], "%d");
+	WHAT_IS(data[3], "%d");
+	WHAT_IS(vp_asp, "%lf");
+	const struct npot_tex *tex = get_curr_tex();
+	double quad_left, quad_right, quad_top, quad_bottom;
+	double tex_left, tex_right, tex_top, tex_bottom;
+	if (tex->per_eye_aspect > vp_asp) {
+		// fill width
+		quad_left = -1;
+		quad_right = 1;
+		quad_top = 1 / tex->per_eye_aspect;
+		quad_bottom = -1 * quad_top;
 	} else {
-		// max height
-		h = 1;
-		w = asp;
+		// fill height
+		quad_top = 1 / vp_asp;
+		quad_bottom = -1 * quad_top;
+		quad_right = quad_top * tex->per_eye_aspect;
+		quad_left = -1 * quad_right;
 	}
-	double tex_left, tex_right;
-	if (textures[curr_img_index].is_stereo) {
+	if (tex->is_stereo) {
 		if (side == LEFT) {
 			tex_left = 0;
-			tex_right = textures[curr_img_index].clip_width / 2;
+			tex_right = tex->clip_width / 2;
 		} else {
-			tex_left = textures[curr_img_index].clip_width / 2;
-			tex_right = textures[curr_img_index].clip_width;
+			tex_left = tex->clip_width / 2;
+			tex_right = tex->clip_width;
 		}
 	} else {
 		tex_left = 0;
-		tex_right = textures[curr_img_index].clip_width;
+		tex_right = tex->clip_width;
 	}
+	tex_top = 0;
+	tex_bottom = tex->clip_height;
+	glBindTexture(GL_TEXTURE_2D, tex->tid);
+	WHAT_IS(tex_left, "%lf");
+	WHAT_IS(tex_right, "%lf");
+	WHAT_IS(tex_top, "%lf");
+	WHAT_IS(tex_bottom, "%lf");
+	WHAT_IS(quad_left, "%lf");
+	WHAT_IS(quad_right, "%lf");
+	WHAT_IS(quad_top, "%lf");
+	WHAT_IS(quad_bottom, "%lf");
+	CHECK_GL;
 	glBegin(GL_QUADS);
-		glTexCoord2d(tex_left,0);
-		glVertex3d(-w,h,0);
-		
-		glTexCoord2d(tex_left,textures[curr_img_index].clip_height);
-		glVertex3d(-w,-h,0);
-		
-		glTexCoord2d(tex_right,textures[curr_img_index].clip_height);
-		glVertex3d(w,-h,0);
-		
-		glTexCoord2d(tex_right,0);
-		glVertex3d(w,h,0);
+	glTexCoord2d(tex_left, tex_top);
+	glVertex2d(quad_left, quad_top);
+	glTexCoord2d(tex_right, tex_top);
+	glVertex2d(quad_right, quad_top);
+	glTexCoord2d(tex_right, tex_bottom);
+	glVertex2d(quad_right, quad_bottom);
+	glTexCoord2d(tex_left, tex_bottom);
+	glVertex2d(quad_left, quad_bottom);
 	glEnd();
+	CHECK_GL;
 	return;
 }
 
 void display()
 {
-	if (stereo_mode) {
-		glDrawBuffer(GL_BACK_LEFT);
-		drawImage(LEFT);
-		glDrawBuffer(GL_BACK_RIGHT);
-		drawImage(RIGHT);
-	} else {
-		drawImage(LEFT);
+	WHERE;
+	STACK;
+	
+	double amount;
+	struct timespec now;
+	struct timespec *pt_less_size, *pt_more_size, *pt_less_conv, *pt_more_conv;
+	int clock_err;
+	/* handle parameter change */
+	if (is_kb_busy > 0) {
+		if (clock_err = clock_gettime(CLOCK_MONOTONIC, &now)) {
+			fprintf(stderr, "Failed to get time, returned %d\n", clock_err);
+			exit(EXIT_FAILURE);
+		}
+		pt_less_size = down_time + '-';
+		pt_more_size = down_time + '=';
+		pt_less_conv = down_time + ',';
+		pt_more_conv = down_time + '.';
+		if (!is_zero_timespec(pt_less_size) && is_zero_timespec(pt_more_size)) {
+			amount = param_change_rate_per_second * time_diff(pt_less_size, &now) * presenter->get_size();
+			presenter->change_size(-amount);
+		} else if (is_zero_timespec(pt_less_size) && !is_zero_timespec(pt_more_size)) {
+			amount = param_change_rate_per_second * time_diff(pt_more_size, &now) * presenter->get_size();
+			presenter->change_size(amount);
+		}
+		if (!is_zero_timespec(pt_less_conv) && is_zero_timespec(pt_more_conv)) {
+			amount = param_change_rate_per_second * time_diff(pt_less_conv, &now);
+			presenter->change_convergence(-amount);
+		} else if (is_zero_timespec(pt_less_conv) && !is_zero_timespec(pt_more_conv)) {
+			amount = param_change_rate_per_second * time_diff(pt_more_conv, &now);
+			presenter->change_convergence(amount);
+		}
+		if (!is_zero_timespec(pt_less_size)) {
+			*pt_less_size = now;
+		}
+		if (!is_zero_timespec(pt_more_size)) {
+			*pt_more_size = now;
+		}
+		if (!is_zero_timespec(pt_less_conv)) {
+			*pt_less_conv = now;
+		}
+		if (!is_zero_timespec(pt_more_conv)) {
+			*pt_more_conv = now;
+		}
+		glutPostRedisplay(); // we wanna update the size and convergence in real-time
 	}
-	/* swap buffers */
+	
+	int side;
+	for (side = LEFT; side <= RIGHT; ++side) {
+		presenter->set_view(side);
+		drawImage(side);
+	}
+	
 	glutSwapBuffers();
-	glutPostRedisplay();
 	return;
 }
 
 /* handles left/right/home/end */
 void specialKeyUp(int k, GLint x, GLint y)
 {
+	WHERE;
+	STACK;
 	switch (k) {
 		case GLUT_KEY_LEFT:
-			curr_img_index--;
+			to_prev_image();
+			presenter->reset_pan();
 			break;
 		case GLUT_KEY_RIGHT:
-			curr_img_index++;
+			to_next_image();
+			presenter->reset_pan();
 			break;
 		case GLUT_KEY_HOME:
-			curr_img_index = 0;
+			to_first_image();
+			presenter->reset_pan();
 			break;
 		case GLUT_KEY_END:
-			curr_img_index = num_imgs - 1;
+			to_last_image();
+			presenter->reset_pan();
+			break;
+		case GLUT_KEY_F11:
+			presenter->toggle_fullscreen();
 			break;
 		default:
 			return;
 	}
-	curr_img_index += num_imgs;
-	curr_img_index %= num_imgs;
 	glutPostRedisplay();
+	return;
+}
+
+void keyDown(unsigned char k, int x, int y)
+{
+	WHERE;
+	STACK;
+	++is_kb_busy;
+	int clock_err;
+	if (clock_err = clock_gettime(CLOCK_MONOTONIC, down_time + k)) {
+		fprintf(stderr, "Failed to get time for key \'%c\'\n", k);
+		fprintf(stderr, "error code of `clock_gettime\': %d\n", clock_err);
+		exit(EXIT_FAILURE);
+	}
+	if (k == 'r') {
+		presenter->reset_convergence();
+		presenter->reset_size();
+		presenter->reset_pan();
+	}
+	glutPostRedisplay(); // handle the parameter change in the display loop
+	return;
+}
+
+void keyUp(unsigned char k, int x, int y)
+{
+	WHERE;
+	STACK;
+	if (--is_kb_busy < 0) {
+		/* This is to prevent key up event when starting the application.  
+		 * Sometimes, there will be a key up event for '\n' when the program is 
+		 * started with a press of the enter key.  This key up event will be sent 
+		 * to GLUT but the corresponding key down event is processed by the OS, 
+		 * resulting in the `is_kb_busy' variable reduced to -1 when this happens.  
+		 */
+		is_kb_busy = 0;
+	}
+	down_time[k] = (struct timespec) { 0 , 0 };
+	glutPostRedisplay();
+	return;
+}
+
+void mouseMotion(int x, int y)
+{
+	is_dragging = 1;
+	presenter->pan(x - drag_start.x, y - drag_start.y);
+	drag_start.x = x;
+	drag_start.y = y;
+	glutPostRedisplay();
+	return;
+}
+
+void mouse(int button, int state, int x, int y)
+{
+	if (button == GLUT_RIGHT_BUTTON && state == GLUT_UP) {
+		to_prev_image();
+		presenter->reset_pan();
+		drag_start.x = drag_start.y = -1;
+		glutPostRedisplay();
+	} else if (button == GLUT_LEFT_BUTTON) {
+		if (state == GLUT_DOWN) {
+			drag_start.x = x;
+			drag_start.y = y;
+			glutMotionFunc(mouseMotion);
+		} else {
+			if (!is_dragging) {
+				to_next_image();
+				presenter->reset_pan();
+				drag_start.x = drag_start.y = -1;
+				glutPostRedisplay();
+			}
+			glutMotionFunc(NULL);
+			is_dragging = 0;
+		}
+	}
 	return;
 }
 
 int main(int argc, char** argv)
 {
-	/* Set the stereo mode.  
-	 * stereo enabled if the first argument is `s'
-	 */
-	stereo_mode = (argv[1][0] == 's') ? 1 : 0;
+	/* parse arguments */
+	int option;
+	switch (option = getopt(argc, argv, "m:")) {
+	case 'm':
+		/* set stereo mode */
+		if (strcmp(optarg, "nv3d") == 0) {
+			fprintf(stderr, "NVidia 3D Vision support is not yet implemented\n");
+			exit(EXIT_FAILURE);
+		} else if (strcmp(optarg, "ovr1") == 0) {
+			config_side_by_side(optarg);
+			presenter = &presentation_side_by_side;
+		} else if (strcmp(optarg, "ovr2") == 0) {
+			config_side_by_side(optarg);
+			presenter = &presentation_side_by_side;
+		} else if (strcmp(optarg, "cross") == 0) {
+			config_side_by_side(optarg);
+			presenter = &presentation_side_by_side;
+		} else if (strcmp(optarg, "parallel") == 0) {
+			config_side_by_side(optarg);
+			presenter = &presentation_side_by_side;
+		} else {
+			fprintf(stderr, "Unrecognized stereo mode: \'%s\'\n", optarg);
+			exit(EXIT_FAILURE);
+		}
+		break;
+	default:
+		fprintf(stderr, "Unrecognized option character: \'%c\'\n", option);
+		exit(EXIT_FAILURE);
+		break;
+	}
+	
 	/* initialize glut */
 	glutInit(&argc, argv);
-	stereo_mode ? 
-		glutInitDisplayMode( GLUT_STEREO | GLUT_DOUBLE | GLUT_RGB ) : 
-		glutInitDisplayMode( GLUT_DOUBLE | GLUT_RGB );
-	glutInitWindowSize(1920,1080); // full HD display
-	int wnd = glutCreateWindow("BeyondStereo & ColorBless Demo");
-	glutFullScreen();
+	presenter->init();
 	printf("OpenGL version: %s\n",glGetString(GL_VERSION));
-    glutDisplayFunc(display);
-    glutSpecialUpFunc(specialKeyUp);
+	glutSetWindowTitle("steveo");
 	
-	/* prepare texture images */
-	num_imgs = argc - 2;
-	imgs = (struct jpeg_img*)malloc(sizeof(struct jpeg_img) * num_imgs);
-	int img_index;
-	for (img_index=0; img_index<num_imgs; ++img_index) {
-		read_jpeg(argv[img_index+2], imgs+img_index);
-	}
-	glActiveTexture(GL_TEXTURE0);
-	checkGLError(18);
-	glEnable(GL_TEXTURE_2D);
-	checkGLError(15);
-	/* generate texture IDs */
-	tids = (GLuint *)malloc(sizeof(GLuint) * num_imgs);
-	glGenTextures(num_imgs,tids);
-	/* make NPOT texutres */
-	textures = (struct npot_tex *)malloc(sizeof(struct npot_tex) * num_imgs);
-	for (img_index=0; img_index<num_imgs; ++img_index) {
-		makePotTex(imgs+img_index,textures+img_index);
-		textures[img_index].tid = tids[img_index];
-	}
-	printf("tid: %u\nreal: %d x %d\nclip: %lf x %lf\n", 
-			textures[0].tid, 
-			textures[0].real_width, 
-			textures[0].real_height, 
-			textures[0].clip_width, 
-			textures[0].clip_height
-		  );
-	/* bind texture objects and transfer texture data */
-	for (img_index=0; img_index<num_imgs; ++img_index) {
-		glBindTexture( GL_TEXTURE_2D , tids[img_index] );
-		checkGLError(16);
-		//glTexParameteri( GL_TEXTURE_2D , GL_TEXTURE_MAG_FILTER , GL_LINEAR );
-		//glTexParameteri( GL_TEXTURE_2D , GL_TEXTURE_MIN_FILTER , GL_LINEAR );
-		glPixelStorei(GL_UNPACK_ALIGNMENT,1);
-		//glPixelStorei(GL_PACK_ALIGNMENT,1);
-		glTexImage2D( 
-				GL_TEXTURE_2D , 0 , GL_RGB , 
-				textures[img_index].pot_width , textures[img_index].pot_height , 
-				0 , GL_RGB , GL_UNSIGNED_BYTE , textures[img_index].data 
-				);
-		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
-		checkGLError(17);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-	}
-	printf("created %d textures with id %ud\n",num_imgs,tids[0]);
-	checkGLError(14);
+	/* initialize image manager */
+	load_images(argc - 3, (const char * const *)argv + 3);
 	
-	curr_img_index = 0;
-    glutMainLoop();
+	/* register program components */
+	glutDisplayFunc(display);
+	glutSpecialUpFunc(specialKeyUp);
+	glutKeyboardFunc(keyDown);
+	glutKeyboardUpFunc(keyUp);
+	glutMouseFunc(mouse);
+	
+	glutMainLoop();
 	return 0;
 }
 

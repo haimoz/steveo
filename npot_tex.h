@@ -12,7 +12,7 @@ struct npot_tex {
 	unsigned int pot_height;
 	double clip_width;
 	double clip_height;
-	double real_aspect;
+	double per_eye_aspect;
 	int is_stereo;
 	GLuint tid;
 	void *data;
@@ -20,6 +20,8 @@ struct npot_tex {
 
 /* make a Power-Of-Two texture from given data */
 void makePotTex(const struct jpeg_img *img, struct npot_tex *tex);
+
+void print_npot_tex(const struct npot_tex *t);
 
 #endif
 
