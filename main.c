@@ -16,9 +16,10 @@
 #define LEFT  0
 #define RIGHT 1
 
-const struct presentation *presenter;
+#define SCROLL_FACTOR 0.1
+#define PARAM_CHANGE_RATE_PER_SECOND 1.2
 
-const double param_change_rate_per_second = 1.2;
+const struct presentation *presenter;
 
 struct timespec down_time[1 << (8 * sizeof(char))] = { 0 };
 int is_kb_busy = 0; // whether the keyboard (non-special keys in GLUT context) is busy
@@ -142,17 +143,17 @@ void display()
 		pt_less_conv = down_time + ',';
 		pt_more_conv = down_time + '.';
 		if (!is_zero_timespec(pt_less_size) && is_zero_timespec(pt_more_size)) {
-			amount = param_change_rate_per_second * time_diff(pt_less_size, &now) * presenter->get_size();
+			amount = PARAM_CHANGE_RATE_PER_SECOND * time_diff(pt_less_size, &now) * presenter->get_size();
 			presenter->change_size(-amount);
 		} else if (is_zero_timespec(pt_less_size) && !is_zero_timespec(pt_more_size)) {
-			amount = param_change_rate_per_second * time_diff(pt_more_size, &now) * presenter->get_size();
+			amount = PARAM_CHANGE_RATE_PER_SECOND * time_diff(pt_more_size, &now) * presenter->get_size();
 			presenter->change_size(amount);
 		}
 		if (!is_zero_timespec(pt_less_conv) && is_zero_timespec(pt_more_conv)) {
-			amount = param_change_rate_per_second * time_diff(pt_less_conv, &now);
+			amount = PARAM_CHANGE_RATE_PER_SECOND * time_diff(pt_less_conv, &now);
 			presenter->change_convergence(-amount);
 		} else if (is_zero_timespec(pt_less_conv) && !is_zero_timespec(pt_more_conv)) {
-			amount = param_change_rate_per_second * time_diff(pt_more_conv, &now);
+			amount = PARAM_CHANGE_RATE_PER_SECOND * time_diff(pt_more_conv, &now);
 			presenter->change_convergence(amount);
 		}
 		if (!is_zero_timespec(pt_less_size)) {
@@ -188,19 +189,19 @@ void specialKeyUp(int k, GLint x, GLint y)
 	switch (k) {
 		case GLUT_KEY_LEFT:
 			to_prev_image();
-			presenter->reset_pan();
+			//presenter->reset_pan();
 			break;
 		case GLUT_KEY_RIGHT:
 			to_next_image();
-			presenter->reset_pan();
+			//presenter->reset_pan();
 			break;
 		case GLUT_KEY_HOME:
 			to_first_image();
-			presenter->reset_pan();
+			//presenter->reset_pan();
 			break;
 		case GLUT_KEY_END:
 			to_last_image();
-			presenter->reset_pan();
+			//presenter->reset_pan();
 			break;
 		case GLUT_KEY_F11:
 			presenter->toggle_fullscreen();
@@ -262,9 +263,11 @@ void mouseMotion(int x, int y)
 
 void mouse(int button, int state, int x, int y)
 {
+	WHAT_IS(button, "%d");
+	WHAT_IS(state, "%d");
 	if (button == GLUT_RIGHT_BUTTON && state == GLUT_UP) {
 		to_prev_image();
-		presenter->reset_pan();
+		//presenter->reset_pan();
 		drag_start.x = drag_start.y = -1;
 		glutPostRedisplay();
 	} else if (button == GLUT_LEFT_BUTTON) {
@@ -275,12 +278,21 @@ void mouse(int button, int state, int x, int y)
 		} else {
 			if (!is_dragging) {
 				to_next_image();
-				presenter->reset_pan();
+				//presenter->reset_pan();
 				drag_start.x = drag_start.y = -1;
 				glutPostRedisplay();
 			}
 			glutMotionFunc(NULL);
 			is_dragging = 0;
+		}
+	} else if (button == 3 || button == 4) {
+		/* scroll wheels as mouse buttons are reported as these buttons down 
+		 * immediately followed by an up
+		 */
+		if (state == GLUT_DOWN) {
+			double delta_size = SCROLL_FACTOR * presenter->get_size() * PARAM_CHANGE_RATE_PER_SECOND;
+			presenter->change_size(button == 3 ? delta_size : -delta_size);
+			glutPostRedisplay();
 		}
 	}
 	return;
